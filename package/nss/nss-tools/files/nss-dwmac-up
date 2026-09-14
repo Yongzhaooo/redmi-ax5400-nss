@@ -1,0 +1,303 @@
+#!/bin/sh
+# Layer ECM on the armed ipq50xx data plane. The nss service armed the
+# wired plane (glue -> fw_mask -> qca-nss-drv) and loaded vlan-mgr before
+# netifd ran; this instance starts alongside netifd, waits for the VLAN
+# topology it builds on the trunk, and brings up connection acceleration.
+set -e
+. /lib/nss/functions.sh
+
+[ "$(readlink /sbin/modprobe)" = /sbin/kmodloader ] ||
+  [ -f "/lib/modules/$(uname -r)/modules.dep" ] ||
+  echo "WARN: modprobe cannot resolve module names here (the 'kmod' package replaced kmodloader and there is no modules.dep) - remove the 'kmod' package or run 'depmod -a'"
+
+GLUE_STATUS=/sys/kernel/debug/qca-dwmac-nss/status
+FWM=/sys/kernel/debug/qca-dwmac-nss/fw_mask
+# Every optional uci read here carries "|| VAR=''": under set -e an
+# assignment from a failing command substitution ends the script, and
+# 'uci -q get' fails for an option that is not set. The board table sets
+# all of them, so a known board never noticed; a board without an entry
+# died right here, before the arm and before ath11k - no firmware plane
+# and, with wifi_offload=1, no radios (measured on a GL-B3000, E287).
+TRUNK="$(uci -q get nss.general.trunk)" || TRUNK=''
+[ -n "$TRUNK" ] || TRUNK=eth0
+
+# Arm the firmware data plane only once netifd has FINISHED with the
+# trunk. Three measured failure modes force this:
+#  - arm on a down eth0: fw starts but its GMAC never delivers ingress
+#    (E124/E125);
+#  - arm while netifd is still applying config: netifd bounces eth0
+#    moments later and the fw plane is closed/reopened mid-setup (E130);
+#  - the GMAC RX filter (promiscuous for the bridge, VLAN filter) only
+#    reaches the hardware while the host still owns it - set after the
+#    takeover it is lost, and tagged/bridged ingress dies silently.
+# So: wait for eth0 up, the lan interface up in netifd's own view, and
+# the bridge's promiscuous flag on the trunk - then give the device
+# churn a moment to drain and arm exactly once.
+eth_up() {
+  [ "$(cat /sys/class/net/$TRUNK/operstate 2>/dev/null)" = "up" ]
+}
+poll_until 30 eth_up || echo "WARN: $TRUNK not up after 30s, arming anyway"
+
+lan_up() {
+  ubus call network.interface.lan status 2>/dev/null | grep -q '"up": true'
+}
+poll_until 30 lan_up || echo "WARN: netifd lan not up after 30s, arming anyway"
+
+eth_promisc() {
+  [ $(( $(cat /sys/class/net/$TRUNK/flags 2>/dev/null || echo 0) & 0x100 )) -ne 0 ]
+}
+poll_until 15 eth_promisc || echo "WARN: $TRUNK not promiscuous after 15s, arming anyway"
+
+sleep 3
+
+if [ "$(cat $FWM 2>/dev/null)" = "0x0" ]; then
+  MASK="$(uci -q get nss.general.fw_mask)" || MASK=''
+  [ -n "$MASK" ] || MASK=0x2
+  echo "$MASK" > $FWM 2>/dev/null
+fi
+
+# Wi-Fi offload is loaded from here, not from the service, because ath11k
+# checks the NSS core state when it registers wifili (see the note in the
+# init script). WIFI_DEFERRED is set when the service left it to us.
+WIFI_OFFLOAD="$(uci -q get nss.general.wifi_offload)" || WIFI_OFFLOAD=''
+[ "$WIFI_OFFLOAD" = "1" ] || WIFI_OFFLOAD=0
+WIFI_LOADED_HERE=0
+
+# Size the firmware's packet-buffer pools. This has to happen after the arm,
+# because the sysctl handler DMA-maps through the core's struct device: the
+# driver refuses the write with -EAGAIN until the core reports INITIALIZED
+# (feed patch 0142 - before it, the same write oopsed the kernel, reported by
+# @danpawlik), and the service's own early call at boot always lands too soon.
+#
+# It is not optional. Without extra_pbuf_core0 the default pool stays around
+# 10k buffers instead of ~29k, the firmware starts failing allocations by the
+# hundred thousand, and it drops the acceleration rules almost as fast as ECM
+# creates them - measured on a Xunison D50 by LS3434: 6156 rules created and
+# 6032 flushed, 90 % of packets excepted to the host, CPU pegged. Sizing the
+# pools took the same board to 2.8 M hash hits and 338 rules.
+#
+# It used to be called only from the Wi-Fi offload path, so every board with
+# nss.general.wifi_offload at 0 ran the firmware on default pools.
+nss_core_ready() { [ -r /sys/kernel/debug/qca-nss-drv/stats/n2h ]; }
+
+PBUF_TUNED=0
+pbuf_tune() {
+  if [ "$PBUF_TUNED" = 1 ]; then
+    return 0
+  fi
+  if poll_until 30 nss_core_ready; then
+    /etc/init.d/qca-nss-pbuf start >/dev/null 2>&1 || true
+    PBUF_TUNED=1
+    echo "pbuf pools sized (extra_pbuf_core0=$(sysctl -n dev.nss.n2hcfg.extra_pbuf_core0 2>/dev/null))"
+  else
+    echo "WARN: NSS core not ready after 30s - pbuf pools stay at their defaults"
+  fi
+  return 0
+}
+
+wifi_load_now() {
+  local offload="$1"
+
+  [ "$WIFI_OFFLOAD" = "1" ] || return 0        # the service already loaded it
+  grep -q '^ath11k_ahb ' /proc/modules && return 0  # someone got there first
+  # NB: the guard is on ath11k_ahb, not ath11k - the core module may be in
+  # already (a service restart, or a build without this package); it is the
+  # _ahb probe that binds the radios, so that is what must not happen twice.
+  # Best-effort from here on, and it has to be: this function also runs on
+  # the failure path, where the whole point is to get the radios up on the
+  # host after the takeover did not happen. The script runs under 'set -e',
+  # so every step here has to be unable to kill us before ath11k_ahb is
+  # loaded - otherwise the board comes up with no radios at all (measured).
+  modprobe ath11k 2>/dev/null || true
+  if [ -w /sys/module/ath11k/parameters/nss_offload ]; then
+    echo "$offload" > /sys/module/ath11k/parameters/nss_offload
+  elif [ "$offload" = 1 ]; then
+    # The knob only exists when mac80211 was built with NSS support. Asking
+    # for wifi_offload=1 against a build without it did nothing at all and
+    # still logged "loaded on the NSS path", so people reasonably believed
+    # the offload was on (#249).
+    echo "WARN: ath11k has no nss_offload parameter - Wi-Fi stays on the host path."
+    echo "WARN: enable NSS offloading under Wireless drivers in menuconfig (CONFIG_ATH11K_NSS_SUPPORT), then: make package/kernel/mac80211/clean"
+    offload=0
+  fi
+  # Pools before the radios bind: each offloaded radio pins ~4096 payloads in
+  # its RXDMA ring out of the shared N2H pool (E177). Only on the armed path -
+  # this function also runs after a failed takeover, where there is no core to
+  # wait for and the whole point is to get the radios up on the host quickly.
+  if [ "$offload" = 1 ]; then
+    pbuf_tune
+  fi
+  modprobe ath11k_ahb 2>/dev/null || true
+  WIFI_LOADED_HERE=1
+  # A PCIe radio (QCN9074/9024 on a board that has one) takes nss.enabled from
+  # the module parameter at probe time too, so it has to be loaded here as
+  # well - not at boot. Absent on boards without one; ignore the failure.
+  modprobe ath11k_pci 2>/dev/null || true
+  echo "ath11k loaded on the $( [ "$offload" = 1 ] && echo NSS || echo host ) path"
+}
+
+# The radios load here, after netifd has already read /etc/config/wireless.
+# The phy hotplug that runs as they appear can still rewrite that file -
+# 05-wifi-migrate moves a radio's path when a DTS renames its wifi node -
+# and nothing tells netifd: 10-wifi-detect only asks it to retry with the
+# config it already holds. On a stock image ath11k loads before netifd
+# starts, so the migration is in place before netifd reads the file.
+# Measured on a GL-B3000 whose QCN6122 moved from b00a040 to b00b040: uci
+# had the new path, netifd kept the old one, and the 5 GHz radio stayed
+# down ("wifi-scripts: Bug: PHY is undefined for device") until a reboot.
+# So wait until the radios are up or the two views disagree, and reload
+# netifd only in the second case - a normal boot reloads nothing.
+radio_sections() {
+  uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'
+}
+
+wifi_netifd_stale() {
+  local r p
+  for r in $(radio_sections); do
+    p="$(uci -q get "wireless.$r.path")"
+    [ -n "$p" ] || continue
+    [ "$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$r.config.path")" = "$p" ] || return 0
+  done
+  return 1
+}
+
+wifi_radios_up() {
+  local r
+  for r in $(radio_sections); do
+    [ "$(uci -q get "wireless.$r.disabled")" = 1 ] && continue
+    [ "$(ubus call network.wireless status 2>/dev/null | jsonfilter -e "@.$r.up")" = true ] || return 1
+  done
+  return 0
+}
+
+wifi_settled() { wifi_netifd_stale || wifi_radios_up; }
+
+wifi_sync_netifd() {
+  [ "$WIFI_LOADED_HERE" = 1 ] || return 0
+  poll_until 20 wifi_settled || return 0
+  if wifi_netifd_stale; then
+    echo "wireless config changed while the radios loaded - reloading netifd"
+    ubus call network reload 2>/dev/null || true
+  fi
+  return 0
+}
+
+fw_started() { grep -q started $GLUE_STATUS 2>/dev/null; }
+poll_until 15 fw_started || {
+  echo "firmware takeover failed - staying on the host data path (same topology)"
+  wifi_load_now 0
+  wifi_sync_netifd
+  exit 1
+}
+
+# The core is up: now ath11k can register wifili and get INITIALIZED.
+wifi_load_now 1
+
+# On the Wi-Fi offload path the call above already did this; on every other
+# path wifi_load_now returned early and this is the only chance to size the
+# pools after the arm.
+pbuf_tune
+
+# Only now teach the firmware the VLANs: on load, vlan-mgr's netdevice
+# notifier replays NETDEV_REGISTER for every existing netdev, so it
+# registers netifd's eth0.<vid> in NSS using the interface number the
+# takeover just created. Loaded any earlier, that lookup fails silently,
+# the VLANs stay host-only and the firmware drops all tagged ingress
+# (measured: E126 vs the working E128 flow).
+modprobe qca-nss-vlan 2>/dev/null
+
+# The PPPoE manager registers each PPPoE session with the firmware as it
+# comes up; ECM then finds an NSS interface number for pppoe-wan and writes
+# the rule. Without it ECM sees the session, marks every rule invalid and
+# the WAN silently stays on the host path (measured on the B3000 with a
+# PPPoE WAN: 0 rules, 22k exceptions in 20 s). Same as nss-up on ipq807x.
+modprobe qca-nss-pppoe 2>/dev/null || true
+
+# Everything below is best-effort: a failure must not leave the firmware
+# armed without the rest of the plane being reported.
+set +e
+
+# Firmware log ring, readable through /sys/kernel/debug/qca-nss-drv/logs
+# and large enough that a trap burst does not overwrite itself.
+FWLOG="$(uci -q get nss.general.fw_logbuf)" || FWLOG=''
+[ -n "$FWLOG" ] || FWLOG=256
+[ "$FWLOG" -ge 32 ] 2>/dev/null && sysctl -qw dev.nss.general.logbuf="$FWLOG"
+
+# netifd builds the VLAN subinterfaces on the trunk; ECM binds to the live
+# topology, so wait for the lan bridge to exist before loading it.
+ubus -t 20 wait_for network.interface 2>/dev/null
+have_bridge() { ls -d /sys/class/net/*/bridge >/dev/null 2>&1; }
+poll_until 15 have_bridge
+
+modprobe ecm front_end_selection=1 2>/dev/null
+
+# Accelerate from the first packet of a flow instead of the default
+# sampling delay - same tuning as the ipq807x plane.
+ecm_ready() { [ -w /sys/kernel/debug/ecm/ecm_classifier_default/accel_delay_pkts ]; }
+poll_until 15 ecm_ready &&
+  echo 1 > /sys/kernel/debug/ecm/ecm_classifier_default/accel_delay_pkts ||
+  echo "WARN: ECM did not come up (no ecm_classifier_default in debugfs)"
+
+# The PPPoE manager only learns sessions that are created after it loads,
+# and netifd has had the session up since long before this point (measured
+# on a GL-B3000: pppd connects at 23 s, the modprobe above runs at ~27 s).
+# Loading the manager is therefore not enough on its own - the firmware
+# ends up with no PPPoE node, ECM finds no interface number for pppoe-wan,
+# and every WAN flow stays on the host path with nothing in the logs:
+# 0 rules, 120k exceptions and 48 % CPU over 15 s, against 129k firmware
+# hits, 1 exception and 3 % once the session is made again (measured, same
+# image and client). So make it again with the manager resident, which is
+# what the 'ifup wan' in nss-up does on ipq807x. Only for a PPPoE WAN: no
+# other WAN type has anything to re-register.
+if [ -n "$(ls -d /sys/class/net/pppoe-* 2>/dev/null)" ]; then
+	. /lib/functions/network.sh
+	network_find_wan wan_iface
+	[ -n "$wan_iface" ] || wan_iface=wan
+	ifup "$wan_iface"
+	wan_has_addr() {
+		_d="$(ifstatus "$wan_iface" 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)"
+		[ -n "$_d" ] || return 1
+		ip -4 addr show dev "$_d" 2>/dev/null | grep -q "inet "
+	}
+	if poll_until 30 wan_has_addr; then
+		echo "PPPoE: $wan_iface re-created with the NSS manager resident"
+	else
+		echo "WARN: $wan_iface has no address 30s after the PPPoE re-up - WAN flows will stay on the host path"
+	fi
+fi
+
+# Drop any connections tracked before ECM loaded so they re-classify
+# through the accelerated path.
+echo 1 > /sys/kernel/debug/ecm/ecm_db/defunct_all 2>/dev/null
+
+if [ -e /sys/kernel/debug/ecm/ecm_nss_ipv4 ]; then
+  echo "NSS wired plane + ECM up (Wi-Fi on the $( [ "$(cat /sys/module/ath11k/parameters/nss_offload 2>/dev/null)" = 1 ] && echo NSS || echo host ) path)"
+else
+  echo "WARN: NSS plane armed but ECM is not accelerating (no ecm_nss_ipv4 in debugfs) - check 'logread | grep -i ecm'"
+fi
+
+# Everything is registered by now - the NSS queues at the arm, the copy
+# engines at ath11k probe - so this is the first moment the interrupts
+# can be placed on the two cores. See the script for why the driver's
+# own version of it cannot do the job here.
+if [ -x /usr/sbin/nss-irq-affinity ]; then
+  /usr/sbin/nss-irq-affinity || echo "WARN: interrupt placement failed"
+fi
+
+# One-shot state dump for the boot log - what the data plane looks like
+# right after bring-up (no periodic monitoring, by design).
+echo "nss-dwmac diag: $(cat $GLUE_STATUS 2>/dev/null | tr '\n' ' ')"
+for p in "/sys/class/net/$TRUNK" "/sys/class/net/$TRUNK".*; do
+  [ -d "$p" ] || continue
+  i="${p##*/}"
+  echo "nss-dwmac diag: $i rx=$(cat "$p/statistics/rx_packets")/$(cat "$p/statistics/rx_bytes")B tx=$(cat "$p/statistics/tx_packets")"
+done
+# the second GMAC, where a board arms one (nss.general.extra_ports)
+for e in $(uci -q get nss.general.extra_ports); do
+  p="/sys/class/net/${e#*:}"
+  [ -d "$p" ] || continue
+  echo "nss-dwmac diag: ${e#*:} (phys_if ${e%%:*}) rx=$(cat "$p/statistics/rx_packets")/$(cat "$p/statistics/rx_bytes")B tx=$(cat "$p/statistics/tx_packets")"
+done
+
+# Last, so nothing above waits on it (see wifi_sync_netifd).
+wifi_sync_netifd

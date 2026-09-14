@@ -1,0 +1,44 @@
+{
+  "release": "v2026.09.14-dual",
+  "upstream": "https://github.com/kuncy7/openwrt-nss-edma",
+  "base": "a7cc5b9d6b6ea31dcae6a6588111417e71f44011",
+  "sha256": "e60a0c27f50a339ca38fd322a2276f48cbddc4c0efbc7b26ac76ea9972a9026b",
+  "bytes": 18893074,
+  "metadata": {
+    "metadata_version": "1.1",
+    "compat_version": "1.0",
+    "supported_devices": [
+      "xiaomi,redmi-ax5400"
+    ],
+    "version": {
+      "dist": "OpenWrt",
+      "version": "SNAPSHOT",
+      "revision": "r0-a7cc5b9",
+      "target": "qualcommax/ipq50xx",
+      "board": "xiaomi_redmi-ax5400"
+    }
+  },
+  "build": {
+    "command": [
+      "make",
+      "-j16",
+      "V=s"
+    ],
+    "exit_code": 0,
+    "started_utc": "2026-09-14T17:30:41.704300+00:00",
+    "ended_utc": "2026-09-14T17:33:45.862918+00:00"
+  },
+  "nss_tools_release": 3,
+  "qca8337_release": 2,
+  "dac_candidate_included": false,
+  "defaults_match_source": true,
+  "kernel_matches_daily_image": true,
+  "switch_and_glue_modules_match_daily_image": true,
+  "offline_tests": [
+    "check_dma.py PASS",
+    "check_switch.py --dual-link PASS",
+    "check_defaults.py PASS"
+  ],
+  "drivers_and_runtime_configuration_hardware_tested": true,
+  "newly_packaged_image_hardware_tested": false
+}

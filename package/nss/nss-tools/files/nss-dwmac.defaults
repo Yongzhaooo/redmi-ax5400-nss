@@ -1,0 +1,309 @@
+# Migrate the network config from the DSA ports to the VLAN-trunk topology
+# the ipq50xx NSS plane uses: the switch fabric splits the front ports into
+# VLANs (VTU programmed by qca8337-nss), the eth0 trunk carries them
+# tagged, and netifd builds eth0.1 (lan) / eth0.2 (wan) on top. The same
+# topology serves both data paths, so this migration is one-way and guarded
+# by a marker - rerunning the script (or a sysupgrade that keeps settings)
+# changes nothing.
+#
+# The per-board table and the board_name keying are George Moussalem's
+# (https://gist.github.com/georgemoussalem/89a1a99d8516855d54533329d391b2ac),
+# folded in with permission.
+#
+# Adding a board: read its switch node in the DTS. cpu_port is the port
+# holding the 'ethernet' phandle; ports is the bitmask of every port in
+# the node; wake_phys lists the front PHYs on the SoC's MDIO bus; vtu
+# puts the CPU port tagged in both VLANs, the lan* ports untagged in 1
+# and wan untagged in 2. If the CPU link enters the switch through one of
+# the switch's own PHYs instead of an SGMII MAC port, use cpu_port=255
+# ("no forced port") and list that PHY in wake_phys too - it has to
+# autonegotiate like a front port. switch_dev names the switch's own MDIO
+# device when it does not sit at the usual address 17 (90000.mdio-1:11).
+#
+# Two GMACs: trunk_if is the GMAC index of the trunk (default 1; 0 where the
+# switch hangs off GMAC0), extra_ports lists any other GMAC in use as
+# '<if>:<netdev>' (a WAN PHY on the other GMAC), and fw_mask says which of
+# them the firmware gets - bit N = GMAC N. fabric='none' on a board with no
+# switch at all. Entries marked UNTESTED come straight from the DTS in
+# openwrt main and have not run on the board: the first report decides.
+
+. /lib/functions.sh
+
+nss_dwmac_board_defaults() {
+	case "$1" in
+	glinet,gl-b3000)
+		# port 0 = CPU (SGMII), 1 = wan, 2-3 = lan
+		fw_mask='0x2'
+		trunk='eth0'
+		switch_args=''
+		vtu='1:0t,2u,3u;2:0t,1u'
+		;;
+	linksys,mx2000|\
+	linksys,mx5500)
+		# port 6 = CPU (SGMII), 2 = wan, 3-5 = lan
+		fw_mask='0x2'
+		trunk='eth0'
+		switch_args='cpu_port=6 ports=0x7c wake_phys=90000.mdio-1:01,90000.mdio-1:02,90000.mdio-1:03,90000.mdio-1:04'
+		vtu='1:6t,3u,4u,5u;2:6t,2u'
+		;;
+	linksys,mr5500)
+		# port 6 = CPU (SGMII), 5 = wan, 1-4 = lan
+		# needs openwrt/openwrt#24927 for the mdio-1 PHY names
+		fw_mask='0x2'
+		trunk='eth0'
+		switch_args='cpu_port=6 ports=0x7e wake_phys=90000.mdio-1:00,90000.mdio-1:01,90000.mdio-1:02,90000.mdio-1:03,90000.mdio-1:04'
+		vtu='1:6t,1u,2u,3u,4u;2:6t,5u'
+		;;
+	xunison,exigo-hub-d50-5g)
+		# WAN is GMAC0's own GE PHY (netdev 'wan'), so GMAC1 - the switch
+		# trunk - comes up as eth1 and carries LAN only: port 0 = CPU
+		# (SGMII), 1-3 = lan. No VTU: one untagged LAN, br-lan on eth1.
+		# Both GMACs are armed: 0x3 hands the ethernet WAN over as
+		# phys_if 0 as well, so routed LAN<->WAN over that PHY is
+		# accelerated. Measured on LS3434's board 2026-09-09: with
+		# 0x2 the WAN side sat on the host, ECM created no rule at all
+		# (empty '#ipv4 special stats', every packet excepted) and the
+		# CPU ran at 90-100%; with 0x3, 98% hash hits and 4% CPU.
+		# A board that uses the 5G modem instead just leaves phys_if 0
+		# armed with the link down, which costs nothing.
+		fw_mask='0x3'
+		trunk='eth1'
+		trunk_if='1'
+		extra_ports='0:wan'
+		wan_on_trunk=0
+		switch_args=''
+		vtu=''
+		;;
+	linksys,spnmx56)
+		# Confirmed on LS3434's board 2026-09-09 - the first board to
+		# arm two GMACs, and the entry below was right as written from
+		# the DTS alone (both ports started, 98% hash hits, 4% CPU).
+		# The switch hangs off GMAC0 through the switch's own
+		# PHY 4 (port 5 = CPU, PHY-to-PHY gmii), so the trunk is eth0
+		# and phys_if 0; ports 2-4 = lan3/lan2/lan1 (PHY 1-3). WAN is a
+		# QCA8081 2.5G PHY on GMAC1, netdev 'wan' = phys_if 1. No VTU:
+		# the switch carries LAN only.
+		fw_mask='0x3'
+		trunk='eth0'
+		trunk_if='0'
+		extra_ports='1:wan'
+		wan_on_trunk=0
+		switch_args='cpu_port=255 ports=0x3c wake_phys=90000.mdio-1:01,90000.mdio-1:02,90000.mdio-1:03,90000.mdio-1:04'
+		vtu=''
+		;;
+	linksys,mx6200)
+		# Confirmed on LS3434's board 2026-09-10. No switch: GMAC0 is the
+		# LAN PHY (netdev 'lan'), GMAC1 a GPY115C on SGMII (netdev 'wan').
+		# Two plain ports, both handed to the firmware; br-lan sits on 'lan'.
+		fw_mask='0x3'
+		trunk='lan'
+		trunk_if='0'
+		extra_ports='1:wan'
+		wan_on_trunk=0
+		fabric='none'
+		switch_args=''
+		vtu=''
+		;;
+	xiaomi,redmi-ax5400)
+		# RA74: WAN1 -> CPU5/PHY4 -> GMAC0; LAN2-4 -> CPU6 -> GMAC1.
+		# Both 1G links were verified with NSS on 2026-09-14.
+		fw_mask='0x3'
+		trunk='eth1'
+		trunk_if='1'
+		wan_trunk='eth0'
+		extra_ports='0:eth0'
+		wifi_offload='0'
+		switch_args='cpu_port=6 ports=0x7e wake_phys=90000.mdio-1:00,90000.mdio-1:01,90000.mdio-1:02,90000.mdio-1:03,90000.mdio-1:04'
+		vtu='1:6t,2u,3u,4u;2:5t,1u'
+		;;
+	cmcc,pz-l8)
+		# UNTESTED. The AX5400's two CPU ports, with the SGMII one on port
+		# 0: port 0 -> GMAC1 (SGMII), port 5 -> GMAC0 (PHY-to-PHY). Trunk
+		# = eth1 = phys_if 1, 4 = wan, 1-3 = lan3/lan2/lan1; port 5 is left
+		# out of the fabric.
+		fw_mask='0x2'
+		trunk='eth1'
+		trunk_if='1'
+		switch_args='cpu_port=0 ports=0x1f wake_phys=90000.mdio-1:00,90000.mdio-1:01,90000.mdio-1:02,90000.mdio-1:03'
+		vtu='1:0t,1u,2u,3u;2:0t,4u'
+		;;
+	cmcc,mr3000d-ci)
+		# Run on the board (forum #313): the wired plane and 5 GHz Wi-Fi
+		# offload come up on this entry unchanged. Port 6 = CPU (SGMII,
+		# GMAC1), 4 = wan, 1-3 = lan3/lan2/lan1. GMAC0 is wired to the
+		# switch's PHY 4 as well, but the DTS gives it no port, so it stays
+		# out of the fabric - it still takes eth0, which makes the trunk eth1.
+		fw_mask='0x2'
+		trunk='eth1'
+		trunk_if='1'
+		switch_args='cpu_port=6 ports=0x5e wake_phys=90000.mdio-1:00,90000.mdio-1:01,90000.mdio-1:02,90000.mdio-1:03'
+		vtu='1:6t,1u,2u,3u;2:6t,4u'
+		;;
+	zyxel,scr50axe|\
+	iodata,wn-dax3000gr|\
+	elecom,wrc-x3000gs2|\
+	elecom,wrc-x3000gst2)
+		# UNTESTED. The D50's layout with the CPU on port 6: GMAC0 is the
+		# SoC's GE PHY as 'wan', GMAC1 the switch trunk on SGMII (eth1),
+		# 1-4 = lan1-4. No VTU: the switch carries LAN only, and both GMACs
+		# go to the firmware as on the D50. The I-O DATA and Elecom boards
+		# put the switch at MDIO address 0x18.
+		fw_mask='0x3'
+		trunk='eth1'
+		trunk_if='1'
+		extra_ports='0:wan'
+		wan_on_trunk=0
+		[ "$1" = "zyxel,scr50axe" ] || switch_dev='90000.mdio-1:18'
+		switch_args='cpu_port=6 ports=0x5e wake_phys=90000.mdio-1:00,90000.mdio-1:01,90000.mdio-1:02,90000.mdio-1:03'
+		vtu=''
+		;;
+	xiaomi,ax6000)
+		# UNTESTED. The SPNMX56's layout: the switch hangs off GMAC0
+		# through the switch's own PHY 3 (port 4 = CPU, PHY-to-PHY gmii),
+		# 1-3 = lan1-3 (PHY 0-2). WAN is a QCA8081 2.5G PHY on GMAC1,
+		# netdev 'wan' = phys_if 1. No VTU: the switch carries LAN only.
+		fw_mask='0x3'
+		trunk='eth0'
+		trunk_if='0'
+		extra_ports='1:wan'
+		wan_on_trunk=0
+		switch_args='cpu_port=255 ports=0x1e wake_phys=90000.mdio-1:00,90000.mdio-1:01,90000.mdio-1:02,90000.mdio-1:03'
+		vtu=''
+		;;
+	yuncore,ax830|\
+	yuncore,ax850)
+		# UNTESTED. The MX6200's layout: no switch, GMAC0 = 'lan' (GE
+		# PHY), GMAC1 = 'wan' on a QCA8081 2.5G PHY.
+		fw_mask='0x3'
+		trunk='lan'
+		trunk_if='0'
+		extra_ports='1:wan'
+		wan_on_trunk=0
+		fabric='none'
+		switch_args=''
+		vtu=''
+		;;
+	*)
+		return 1
+		;;
+	esac
+}
+
+[ -n "$(uci -q get nss.general.topology)" ] && exit 0
+
+board="$(board_name)"
+known_board=1
+if ! nss_dwmac_board_defaults "$board"; then
+	known_board=0
+	logger -t nss "no NSS switch defaults for board '$board' - set nss.general.{vtu,switch_args} by hand (see README.ipq50xx.md)"
+fi
+
+# qca-nss-drv's own init does nothing but interrupt affinity and firmware
+# RPS, from a table written for a quad-core ipq807x, at START=94 - before
+# the plane is armed, so the interrupts it wants do not exist yet and the
+# CPU 2/3 writes fail on this SoC. nss-irq-affinity does the same job from
+# nss-dwmac-up, after the arm, so keep the driver's version out of the way.
+[ -x /etc/init.d/qca-nss-drv ] && /etc/init.d/qca-nss-drv disable
+
+# Defaults for the ipq50xx plane (the config file itself ships with
+# qca-nss-drv; only fill what is not set).
+[ -n "$(uci -q get nss.general.enabled)" ] || uci set nss.general.enabled='1'
+# Wi-Fi offload on by default: it has run on the GL-B3000 and the MX2000. A
+# board entry can still set wifi_offload='0' to keep its radios on the host.
+[ -n "$(uci -q get nss.general.wifi_offload)" ] || uci set nss.general.wifi_offload="${wifi_offload:-1}"
+# This release validates host Wi-Fi on RA74. Existing migrated setups exit above.
+[ "$board" != 'xiaomi,redmi-ax5400' ] || uci set nss.general.wifi_offload='0'
+[ -n "$(uci -q get nss.general.fw_logbuf)" ] || uci set nss.general.fw_logbuf='256'
+[ -z "$(uci -q get nss.general.fw_mask)" ] && [ -n "$fw_mask" ] && uci set nss.general.fw_mask="$fw_mask"
+# Do not touch a WAN that is already a VLAN on the trunk. Someone coming from
+# another tree with a tagged ISP handover has network.wan.device set to
+# eth0.<their vid>, and rewriting that to eth0.2 takes their link down -
+# measured on an MX2000 whose ISP hands over tagged 35 (LS3434, forum #232).
+wan_vid=2
+if [ "$known_board" = 1 ] && [ "${wan_on_trunk:-1}" = 1 ]; then
+	wan_trunk="${wan_trunk:-$trunk}"
+	[ -n "$wan_trunk" ] || wan_trunk=eth0
+	cur_wan="$(uci -q get network.wan.device)"
+	case "$cur_wan" in
+	"$wan_trunk".*)
+		vid="${cur_wan##*.}"
+		case "$vid" in
+		''|*[!0-9]*) ;;
+		*) wan_vid="$vid" ;;
+		esac
+		;;
+	esac
+fi
+
+# The board tables put the WAN on VLAN 2; if the admin's WAN device says a
+# different vid, carry it into the VTU's wan block so both sides match. The
+# block is the last one and starts with '2:', so only its vid changes - the
+# port membership the board needs stays as it is.
+if [ -n "$vtu" ] && [ "${wan_vid:-2}" != 2 ]; then
+	case "$vtu" in
+	*';2:'*) vtu="${vtu%;2:*};${wan_vid}:${vtu##*;2:}" ;;
+	esac
+fi
+
+[ -z "$(uci -q get nss.general.vtu)" ] && [ -n "$vtu" ] && uci set nss.general.vtu="$vtu"
+[ -z "$(uci -q get nss.general.switch_args)" ] && [ -n "$switch_args" ] && uci set nss.general.switch_args="$switch_args"
+[ -z "$(uci -q get nss.general.switch_dev)" ] && [ -n "$switch_dev" ] && uci set nss.general.switch_dev="$switch_dev"
+# The trunk netdev: eth0 where GMAC0 is disabled or is the trunk itself; eth1
+# where GMAC0 takes a netdev of its own (a WAN PHY, or a second link into the
+# switch); the PHY's name on a board with no switch.
+[ -z "$(uci -q get nss.general.trunk)" ] && [ -n "$trunk" ] && uci set nss.general.trunk="$trunk"
+[ -z "$(uci -q get nss.general.trunk_if)" ] && [ -n "$trunk_if" ] && uci set nss.general.trunk_if="$trunk_if"
+[ -z "$(uci -q get nss.general.extra_ports)" ] && [ -n "$extra_ports" ] && uci set nss.general.extra_ports="$extra_ports"
+[ -z "$(uci -q get nss.general.fabric)" ] && [ -n "$fabric" ] && uci set nss.general.fabric="$fabric"
+
+# Rewrite the network only for a board this script actually knows. On an
+# unknown board the trunk may not be the right topology at all - e.g. the
+# Xunison Exigo D50 puts WAN on its own GE PHY and hangs only LAN ports off
+# the switch, so there is no wan VLAN to move anything to, and forcing
+# eth0.1/eth0.2 here left it with a WAN device that does not exist.
+if [ "$known_board" = 1 ]; then
+	[ -n "$trunk" ] || trunk=eth0
+	if [ "${wan_on_trunk:-1}" = 1 ]; then
+		# WAN shares the trunk: br-lan gets the lan VLAN, wan the wan VLAN.
+		lan_port="$trunk.1"
+
+		# wan_vid was worked out above: 2 unless the admin already has
+		# the WAN on another VLAN of the trunk, in which case theirs is
+		# kept and the VTU was rewritten to match.
+		if [ "${wan_vid:-2}" = 2 ]; then
+			[ -n "$(uci -q get network.wan)" ] && uci set network.wan.device="$wan_trunk.2"
+			[ -n "$(uci -q get network.wan6)" ] && uci set network.wan6.device="$wan_trunk.2"
+			# Keep the stock RA74 WAN device's MAC/MTU attached to its new VLAN.
+			if [ "$board" = 'xiaomi,redmi-ax5400' ]; then
+				ra74_wan_device() {
+					local name
+					config_get name "$1" name
+					case "$name" in
+					wan|eth1.2) uci set "network.$1.name=$wan_trunk.2" ;;
+					esac
+				}
+				config_load network
+				config_foreach ra74_wan_device device
+			fi
+		else
+			logger -t nss "keeping the existing WAN device $cur_wan (VLAN $wan_vid on the trunk); the default VTU is being rewritten to match, but tagged-vs-untagged on the WAN port is yours to set in nss.general.vtu"
+		fi
+		uci set nss.general.topology='vlan-trunk'
+	else
+		# LAN-only trunk: br-lan sits on the untagged trunk, wan is its
+		# own netdev and stays whatever the board's defaults made it.
+		lan_port="$trunk"
+		uci set nss.general.topology='lan-trunk'
+	fi
+
+	# br-lan: replace the DSA user ports with the trunk (or its lan VLAN).
+	lan_dev="$(uci -q get network.@device[0].name)"
+	if [ "$lan_dev" = "br-lan" ]; then
+		uci -q delete network.@device[0].ports
+		uci add_list network.@device[0].ports="$lan_port"
+	fi
+fi
+
+uci commit
+
+exit 0
