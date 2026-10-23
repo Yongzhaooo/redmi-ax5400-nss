@@ -1,0 +1,65 @@
+{
+  "release": "v2026.10.23-ath11k",
+  "upstream": "https://github.com/kuncy7/openwrt-nss-edma",
+  "base": "a7cc5b9d6b6ea31dcae6a6588111417e71f44011",
+  "source_commit": "3d76691d96",
+  "sha256": "0ebadc57b83c13dcac34b924b2894d938c9617dfc8a86658aade6d06de4f4f2a",
+  "bytes": 18913557,
+  "metadata": {
+    "supported_devices": [
+      "xiaomi,redmi-ax5400"
+    ],
+    "version": {
+      "dist": "OpenWrt",
+      "version": "SNAPSHOT",
+      "revision": "r3-3d76691d96",
+      "target": "qualcommax/ipq50xx",
+      "board": "xiaomi_redmi-ax5400"
+    }
+  },
+  "build": {
+    "command": [
+      "make",
+      "-j20",
+      "V=s"
+    ],
+    "exit_code": 0,
+    "started_utc": "2026-10-23T18:06:02Z",
+    "ended_utc": "2026-10-23T18:19:57Z",
+    "fresh_tree": true
+  },
+  "added_patches": [
+    "package/kernel/mac80211/patches/nss/ath11k/999-960-ath11k-read-the-HTT-completion-status-at-the-right-offset.patch",
+    "target/linux/qualcommax/patches-6.18/0092-net-phy-at803x-fix-short-cable-dac-field.patch",
+    "target/linux/qualcommax/patches-6.18/0093-net-phy-at803x-apply-IPQ5018-analog-settings-at-probe.patch"
+  ],
+  "kernel_config_added": [
+    "CONFIG_KERNEL_SLUB_DEBUG=y"
+  ],
+  "nss_tools_release": 3,
+  "qca8337_release": 2,
+  "offline_tests": [
+    "check_dma.py PASS",
+    "check_switch.py --dual-link PASS",
+    "check_defaults.py PASS"
+  ],
+  "compared_with_daily_v2_image": {
+    "daily_v2_sha256": "90d85a603212db522db3c63614497b79acb641112e06499023cf26916bcac87b",
+    "kernel_text_identical": true,
+    "kernel_rodata_data_differ_only_in_version_strings": true,
+    "dtb_identical": true,
+    "identical_modules": [
+      "ath11k.ko",
+      "ath11k_ahb.ko",
+      "ath11k_pci.ko",
+      "mac80211.ko",
+      "cfg80211.ko",
+      "qca8337-nss.ko",
+      "qca-dwmac-nss.ko",
+      "qca-nss-drv.ko"
+    ],
+    "daily_v2_extra": "monitoring packages and single-link nss-tools r2 defaults"
+  },
+  "kernel_changes_hardware_tested_hours": 24,
+  "newly_packaged_image_hardware_tested": false
+}
