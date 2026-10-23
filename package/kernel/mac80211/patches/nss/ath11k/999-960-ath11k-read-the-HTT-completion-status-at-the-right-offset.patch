@@ -1,0 +1,92 @@
+From: Yongzhao Chen <yongzhao.derek@gmail.com>
+Subject: [PATCH] ath11k: read the HTT completion status at the right offset
+
+ath11k_dp_tx_completion_valid() added in 244-ath11k-dp-tx-perf computed
+the HTT status overlay as
+
+  ((struct htt_tx_wbm_completion *)desc) + HTT_TX_WBM_COMP_STATUS_OFFSET
+
+HTT_TX_WBM_COMP_STATUS_OFFSET is a byte offset (8) and the struct is 16
+bytes, so the filter read desc + 128: the buffer address of the release
+entry four slots later. Whenever bits 12:9 of that unrelated address were
+5, a firmware-released completion was taken for MEC_NOTIFY and skipped.
+The skb stayed in the tx idr pool, DMA mapped, forever and without a
+warning. On RA74 this is mainly multicast/broadcast data (the firmware
+releases those), about 0-5 % of them, and leads to OOM after days.
+
+The original QSDK patch used byte arithmetic; the struct cast came in with
+the 2024-01 patch squash. Use the same form as
+ath11k_dp_tx_process_htt_tx_complete().
+
+Also initialize msdu in ath11k_dp_tx_htt_tx_complete_buf(), which was
+read uninitialized when the id lookup failed, and expose two counters in
+soc_dp_stats for monitoring: completions skipped as MEC_NOTIFY and the
+per-pdev host tx pending count (num_tx_pending). A pending count that only
+grows means completions are being lost again.
+
+---
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -976,6 +976,8 @@
+ 	atomic_t max_fail;
+ 	/* Tx failures due to NSS Tx error status */
+ 	atomic_t nss_tx_fail;
++	/* fw-released completions skipped as MEC_NOTIFY */
++	atomic_t compl_mec_skip;
+ };
+ 
+ struct ath11k_soc_dp_stats {
+--- a/drivers/net/wireless/ath/ath11k/debugfs.c
++++ b/drivers/net/wireless/ath/ath11k/debugfs.c
+@@ -731,6 +731,19 @@
+ 			 atomic_read(&soc_stats->tx_err.nss_tx_fail));
+ 
+ 	len += scnprintf(buf + len, size - len,
++			 "\nTX Completions Skipped (MEC notify): %d\n",
++			 atomic_read(&soc_stats->tx_err.compl_mec_skip));
++
++	len += scnprintf(buf + len, size - len, "\nTX Pending (host path):\n");
++	for (i = 0; i < ab->num_radios; i++) {
++		struct ath11k *ar = ab->pdevs[i].ar;
++
++		if (ar)
++			len += scnprintf(buf + len, size - len, "pdev%d: %d\n",
++					 i, atomic_read(&ar->dp.num_tx_pending));
++	}
++
++	len += scnprintf(buf + len, size - len,
+ 			 "\nHAL_REO_CMD_DRAIN Counter: %u\n",
+ 			 soc_stats->hal_reo_cmd_drain);
+ 
+--- a/drivers/net/wireless/ath/ath11k/dp_tx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_tx.c
+@@ -402,7 +402,7 @@
+ 				 struct ath11k_dp_htt_wbm_tx_status *ts)
+ {
+ 	struct ieee80211_tx_status status = {};
+-	struct sk_buff *msdu;
++	struct sk_buff *msdu = NULL;
+ 	struct ieee80211_tx_info *info;
+ 	struct ath11k_skb_cb *skb_cb;
+ 	struct ath11k *ar;
+@@ -825,7 +825,7 @@
+ 
+ 	if (FIELD_GET(HAL_WBM_RELEASE_INFO0_REL_SRC_MODULE, desc->info0) ==
+ 	    HAL_WBM_REL_SRC_MODULE_FW) {
+-		status_desc = ((struct htt_tx_wbm_completion *)desc) + HTT_TX_WBM_COMP_STATUS_OFFSET;
++		status_desc = (void *)desc + HTT_TX_WBM_COMP_STATUS_OFFSET;
+ 
+ 		/* Dont consider HTT_TX_COMP_STATUS_MEC_NOTIFY */
+ 		if (FIELD_GET(HTT_TX_WBM_COMP_INFO0_STATUS, status_desc->info0) ==
+@@ -865,8 +865,10 @@
+ 
+ 	while ((desc = (struct hal_wbm_release_ring *)
+ 		ath11k_hal_srng_dst_get_next_cache_entry(ab, status_ring))) {
+-		if (!ath11k_dp_tx_completion_valid((struct hal_wbm_release_ring *)desc))
++		if (!ath11k_dp_tx_completion_valid((struct hal_wbm_release_ring *)desc)) {
++			atomic_inc(&ab->soc_stats.tx_err.compl_mec_skip);
+ 			continue;
++		}
+ 
+ 		memcpy(&tx_ring->tx_status[count],
+ 		       desc, sizeof(struct hal_wbm_release_ring));

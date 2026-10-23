@@ -1,0 +1,25 @@
+From: Yongzhao Chen <yongzhao.derek@gmail.com>
+Subject: net: phy: qcom: at803x: fix the IPQ5018 short-cable DAC field
+
+Backport of the net fix 20f3599d85b4, which is in 6.18.56. Drop this patch
+once the kernel has it.
+
+Signed-off-by: Yongzhao Chen <yongzhao.derek@gmail.com>
+--- a/drivers/net/phy/qcom/at803x.c
++++ b/drivers/net/phy/qcom/at803x.c
+@@ -1065,11 +1065,13 @@
+ 	if (priv->set_short_cable_dac) {
+ 		/* setting MDAC (Multi-level Digital-to-Analog Converter) in MMD1 */
+ 		phy_modify_mmd(phydev, MDIO_MMD_PMAPMD, IPQ5018_PHY_MMD1_MDAC,
+-			       IPQ5018_PHY_DAC_MASK, IPQ5018_PHY_MMD1_MDAC_VAL);
++			       IPQ5018_PHY_DAC_MASK,
++			       FIELD_PREP(IPQ5018_PHY_DAC_MASK, IPQ5018_PHY_MMD1_MDAC_VAL));
+ 
+ 		/* setting EDAC (Error-detection and Correction) in debug register */
+ 		at803x_debug_reg_mask(phydev, IPQ5018_PHY_DEBUG_EDAC,
+-				      IPQ5018_PHY_DAC_MASK, IPQ5018_PHY_DEBUG_EDAC_VAL);
++				      IPQ5018_PHY_DAC_MASK,
++				      FIELD_PREP(IPQ5018_PHY_DAC_MASK, IPQ5018_PHY_DEBUG_EDAC_VAL));
+ 	}
+ 
+ 	return 0;
