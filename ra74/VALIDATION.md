@@ -2,6 +2,22 @@
 
 ## 中文
 
+### 2026-10-24：Wi-Fi 吞吐与可选的 Wi-Fi NSS 卸载
+
+测试环境：日用固件（与 `v2026.10.23-ath11k` 的内核和模块相同），5 GHz 改为 `HE160`、信道 36。ROG 笔记本（Intel AX211）以 2401.9 Mbps 关联，另一端是有线千兆电脑。每项 iperf 持续 15 秒，主 CPU 和 NSS 核心按秒采样。
+
+| 测试 | 卸载关闭（默认） | 卸载开启 | 主 CPU 平均 |
+| --- | --- | --- | --- |
+| 有线→Wi-Fi，4 个连接 | 693 Mbps | 901 Mbps | 83% → 10% |
+| Wi-Fi→有线，4 个连接 | 679 Mbps | 945 Mbps | 98% → 12% |
+| 有线→Wi-Fi，单连接 | 237 Mbps | 613 Mbps | 31% → 9% |
+
+- 卸载关闭时，瓶颈是 1.0 GHz 双核主 CPU：QCN9074 的数据中断全部在 CPU0 上，4 个连接时两个核都接近满载，空口没有丢包。所以 80 MHz 改成 160 MHz 后吞吐几乎不变。
+- 开启方法：`uci set nss.general.wifi_offload=1 && uci commit nss && reboot`；改回 0 后同样要重启。
+- 代价是内存：NSS 接收缓冲池按 512 MB 档位扩大，SUnreclaim 从 61–62 MiB 升到 102–108 MiB，开机约 13 小时后升到这个范围，之后 18 小时没有增长；MemAvailable 最低 116 MiB，通常在 120–132 MiB。开机时有 8 次缓冲分配失败，之后没有增加。
+- 稳定性：卸载开启后连续运行 32 小时，没有重启、OOM 或内核崩溃记录，期间 5 GHz 最多有 3 个终端在日常使用。发布镜像的默认值仍为关闭，需要的话按上面的命令自行开启。
+- 只测了单个 2×2 Wi-Fi 6 终端；多终端、2.4 GHz 和 Mesh 没有测。OpenWrt 默认把 5 GHz 设为 `HE80`；`HE160` 在 ETSI 地区会用到 DFS 信道 52–64，每次启用前 5 GHz 有 60 秒雷达检测。
+
 ### 2026-10-23：ath11k 回执修复与 PHY 修复
 
 内核修改在我的 RA74 日用固件里运行（10/22 15:53 UTC 刷入，保留配置）。以下是之后约 24 小时的 Prometheus 记录：
@@ -51,6 +67,22 @@ Ookla 的下载/上传分开运行。并发试验中另取 5.151 秒的网卡计
 - 镜像私人配置/密钥检查通过；新镜像尚未单独刷机，不将离线测试当成实机验收。
 
 ## English
+
+### 2026-10-24: Wi-Fi throughput and optional Wi-Fi NSS offload
+
+Setup: the daily firmware (same kernel and modules as `v2026.10.23-ath11k`), 5 GHz changed to `HE160` on channel 36. A ROG laptop (Intel AX211) associated at 2401.9 Mbps; the other end was a wired Gigabit PC. Each iperf run lasted 15 seconds, with the host CPU and NSS core sampled every second.
+
+| Test | Offload off (default) | Offload on | Host CPU average |
+| --- | --- | --- | --- |
+| Wired→Wi-Fi, 4 streams | 693 Mbps | 901 Mbps | 83% → 10% |
+| Wi-Fi→wired, 4 streams | 679 Mbps | 945 Mbps | 98% → 12% |
+| Wired→Wi-Fi, 1 stream | 237 Mbps | 613 Mbps | 31% → 9% |
+
+- With offload off, the 1.0 GHz dual-core host CPU is the bottleneck: all QCN9074 data interrupts land on CPU0, both cores are near saturation with 4 streams, and the air link drops nothing. That is why moving from 80 to 160 MHz barely changed throughput.
+- To enable: `uci set nss.general.wifi_offload=1 && uci commit nss && reboot`. Setting it back to 0 also needs a reboot.
+- The cost is memory: the NSS receive pool grows under the 512 MB profile, and SUnreclaim rises from 61–62 MiB to 102–108 MiB, reaching that range about 13 hours after boot and staying flat for the remaining 18 hours. MemAvailable bottomed at 116 MiB and usually sat at 120–132 MiB. Eight buffer allocations failed at boot and none since.
+- Stability: 32 hours with offload on and up to 3 clients in daily use on 5 GHz, with no reboot, OOM or kernel crash record. The released image still defaults to off; enable it with the command above if you want it.
+- Only one 2×2 Wi-Fi 6 client was tested; multiple clients, 2.4 GHz and mesh were not. OpenWrt defaults 5 GHz to `HE80`. In ETSI regions `HE160` uses DFS channels 52–64, so 5 GHz runs a 60-second radar check each time it starts.
 
 ### 2026-10-23: ath11k completion fix and PHY fixes
 
