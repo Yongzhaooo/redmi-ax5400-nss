@@ -15,7 +15,7 @@
 - 卸载关闭时，瓶颈是 1.0 GHz 双核主 CPU：QCN9074 的数据中断全部在 CPU0 上，4 个连接时两个核都接近满载，空口没有丢包。所以 80 MHz 改成 160 MHz 后吞吐几乎不变。
 - 开启方法：`uci set nss.general.wifi_offload=1 && uci commit nss && reboot`；改回 0 后同样要重启。
 - 代价是内存：NSS 接收缓冲池按 512 MB 档位扩大，SUnreclaim 从 61–62 MiB 升到 102–108 MiB，开机约 13 小时后升到这个范围，之后 18 小时没有增长；MemAvailable 最低 116 MiB，通常在 120–132 MiB。开机时有 8 次缓冲分配失败，之后没有增加。
-- 稳定性：卸载开启后连续运行 32 小时，没有重启、OOM 或内核崩溃记录，期间 5 GHz 最多有 3 个终端在日常使用。发布镜像的默认值仍为关闭，需要的话按上面的命令自行开启。
+- 稳定性：卸载开启后连续运行 32 小时，没有重启、OOM 或内核崩溃记录，期间 5 GHz 最多有 3 个终端在日常使用。我已把它定为自己的日用配置。发布镜像的默认值仍为关闭：已在用的设备按上面的命令开启，自编镜像想默认开启见[编译说明](BUILD.md#中文默认开启-wi-fi-nss-卸载可选)。
 - 只测了单个 2×2 Wi-Fi 6 终端；多终端、2.4 GHz 和 Mesh 没有测。OpenWrt 默认把 5 GHz 设为 `HE80`；`HE160` 在 ETSI 地区会用到 DFS 信道 52–64，每次启用前 5 GHz 有 60 秒雷达检测。
 
 ### 2026-10-23：ath11k 回执修复与 PHY 修复
@@ -81,7 +81,7 @@ Setup: the daily firmware (same kernel and modules as `v2026.10.23-ath11k`), 5 G
 - With offload off, the 1.0 GHz dual-core host CPU is the bottleneck: all QCN9074 data interrupts land on CPU0, both cores are near saturation with 4 streams, and the air link drops nothing. That is why moving from 80 to 160 MHz barely changed throughput.
 - To enable: `uci set nss.general.wifi_offload=1 && uci commit nss && reboot`. Setting it back to 0 also needs a reboot.
 - The cost is memory: the NSS receive pool grows under the 512 MB profile, and SUnreclaim rises from 61–62 MiB to 102–108 MiB, reaching that range about 13 hours after boot and staying flat for the remaining 18 hours. MemAvailable bottomed at 116 MiB and usually sat at 120–132 MiB. Eight buffer allocations failed at boot and none since.
-- Stability: 32 hours with offload on and up to 3 clients in daily use on 5 GHz, with no reboot, OOM or kernel crash record. The released image still defaults to off; enable it with the command above if you want it.
+- Stability: 32 hours with offload on and up to 3 clients in daily use on 5 GHz, with no reboot, OOM or kernel crash record. It is now my daily setting. The released image still defaults to off: enable it on a running device with the command above, or see [Building](BUILD.md#english-wi-fi-nss-offload-on-by-default-optional) to make your own image default to on.
 - Only one 2×2 Wi-Fi 6 client was tested; multiple clients, 2.4 GHz and mesh were not. OpenWrt defaults 5 GHz to `HE80`. In ETSI regions `HE160` uses DFS channels 52–64, so 5 GHz runs a 60-second radar check each time it starts.
 
 ### 2026-10-23: ath11k completion fix and PHY fixes

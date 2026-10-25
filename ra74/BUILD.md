@@ -53,3 +53,33 @@ Output is under `bin/targets/qualcommax/ipq50xx/`; the device must be `xiaomi_re
 [feeds.conf](feeds.conf) pins all six feeds and replaces the machine-local NSS `src-link`. [source.patch](source.patch) records the original tested driver changes and is **already applied**. Dual-link defaults and the 2026-10-23 ath11k and PHY patches are additional changes on top; see provenance.
 
 The release uses the existing Linux build cache with a full `make -j16 V=s`, excluding the DAC candidate. The portable empty-cache procedure has not been rerun end to end. Repository version strings, timestamps and newly generated signing keys may change binaries, so bit-for-bit reproduction of the release hash is not promised. Inherited GitHub Actions are currently disabled; automatic updates are not provided.
+
+## 中文：默认开启 Wi-Fi NSS 卸载（可选）
+
+发布镜像让 RA74 的 Wi-Fi 走主机路径。开启 Wi-Fi NSS 卸载后，Wi-Fi 与有线之间的吞吐从约 690 Mbps 提高到 900–945 Mbps，代价是约 44 MiB 内存，测试范围见[实测结果](VALIDATION.md)。想让自编镜像首次迁移时就开启，在 `make defconfig` 之后、运行测试之前改两处默认值和一处测试期望：
+
+```sh
+D=package/nss/nss-tools/files/nss-dwmac.defaults
+sed -i "/xiaomi,redmi-ax5400)/,/;;/ s/wifi_offload='0'/wifi_offload='1'/" "$D"
+sed -i "/redmi-ax5400' ] || uci set nss.general.wifi_offload='0'/d" "$D"
+sed -i "s/'nss.general.wifi_offload': '0', 'nss.general.topology'/'nss.general.wifi_offload': '1', 'nss.general.topology'/" ra74/tests/check_defaults.py
+git diff --stat   # 应只有这两个文件变化
+python3 ra74/tests/check_defaults.py .
+```
+
+这些默认值只在首次迁移到双链路时写入。保留配置升级时，脚本发现已有 `nss.general.topology` 就直接退出，原有的 `wifi_offload` 不变。已在用的设备不需要重新编译，运行 `uci set nss.general.wifi_offload=1 && uci commit nss && reboot` 即可；改回 0 同样需要重启。
+
+## English: Wi-Fi NSS offload on by default (optional)
+
+The released image keeps RA74 Wi-Fi on the host path. With Wi-Fi NSS offload on, Wi-Fi to wired throughput rose from about 690 Mbps to 900–945 Mbps at a cost of about 44 MiB of memory; see [Validation](VALIDATION.md) for the test scope. To have your own image enable it on first migration, change two defaults and one test expectation after `make defconfig` and before running the tests:
+
+```sh
+D=package/nss/nss-tools/files/nss-dwmac.defaults
+sed -i "/xiaomi,redmi-ax5400)/,/;;/ s/wifi_offload='0'/wifi_offload='1'/" "$D"
+sed -i "/redmi-ax5400' ] || uci set nss.general.wifi_offload='0'/d" "$D"
+sed -i "s/'nss.general.wifi_offload': '0', 'nss.general.topology'/'nss.general.wifi_offload': '1', 'nss.general.topology'/" ra74/tests/check_defaults.py
+git diff --stat   # only these two files should change
+python3 ra74/tests/check_defaults.py .
+```
+
+These defaults are written only on the first migration to dual links. On an upgrade that keeps settings, the script exits as soon as it finds `nss.general.topology`, so an existing `wifi_offload` stays as it was. A device already in use needs no rebuild: run `uci set nss.general.wifi_offload=1 && uci commit nss && reboot`. Switching back to 0 also needs a reboot.

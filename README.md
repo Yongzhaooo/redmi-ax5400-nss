@@ -10,7 +10,7 @@
 
 - **NSS 收包修复**：GMAC1 DMA 描述符使用 SDRAM。
 - **QCA8337 r2 修复**：先配置并回读 VLAN 隔离，再开放端口；失败时尝试阻断端口并拒绝接管。
-- **双链路默认配置**：WAN=`eth0.2`、LAN=`eth1.1`，两路 NSS 都启用，Wi-Fi NSS 卸载默认关闭。开启后 Wi-Fi 与有线之间约 900–945 Mbps，关闭时主 CPU 限制在约 690 Mbps，见[实测结果](ra74/VALIDATION.md)。
+- **双链路默认配置**：WAN=`eth0.2`、LAN=`eth1.1`，两路 NSS 都启用，Wi-Fi NSS 卸载默认关闭。开启后 Wi-Fi 与有线之间约 900–945 Mbps，关闭时主 CPU 限制在约 690 Mbps，见[实测结果](ra74/VALIDATION.md)；自编镜像可改为默认开启，见[编译说明](ra74/BUILD.md)。
 - **ath11k 回执泄漏修复**（2026-10-23 加入）：NSS 补丁 `244-ath11k-dp-tx-perf` 读错了 HTT 回执状态的位置，一部分固件释放的帧（主要是组播和广播）的回执被当成 MEC 通知跳过，skb 永远不释放，路由器几天后内存耗尽。修复见 `999-960`，它还在 `soc_dp_stats` 里加了被跳过回执数和每个频段的待完成帧数。
 - **IPQ5018 内部 PHY 修复**：DAC 位域修复（`0092`，已进 6.18.56）和 probe 时就写入模拟参数（`0093`，已进 net-next）。
 - 内核打开 `SLUB_DEBUG`，提供 `/proc/slabinfo`；运行时调试仍关闭。
@@ -39,7 +39,7 @@ Included in this repository:
 
 - **NSS receive fix:** GMAC1 DMA descriptors in SDRAM.
 - **QCA8337 r2 changes:** program and read back VLAN isolation before enabling ports; attempt port blocking and refuse takeover on failure.
-- **Dual-link defaults:** WAN on `eth0.2`, LAN on `eth1.1`, both NSS interfaces enabled, Wi-Fi NSS offload disabled by default. Turning it on raised Wi-Fi to wired throughput from about 690 Mbps (host CPU bound) to 900–945 Mbps; see [Validation](ra74/VALIDATION.md).
+- **Dual-link defaults:** WAN on `eth0.2`, LAN on `eth1.1`, both NSS interfaces enabled, Wi-Fi NSS offload disabled by default. Turning it on raised Wi-Fi to wired throughput from about 690 Mbps (host CPU bound) to 900–945 Mbps; see [Validation](ra74/VALIDATION.md). Your own build can default it to on; see [Building](ra74/BUILD.md).
 - **ath11k completion leak fix** (added 2026-10-23): the NSS patch `244-ath11k-dp-tx-perf` read the HTT completion status from the wrong place. Some firmware-released frames, mostly multicast and broadcast, had their completion skipped as a MEC notification, their skbs were never freed, and the router ran out of memory after a few days. `999-960` fixes it and adds two `soc_dp_stats` counters: skipped completions and pending frames per radio.
 - **IPQ5018 internal PHY fixes:** the DAC field fix (`0092`, in 6.18.56) and writing the analog settings at probe (`0093`, in net-next).
 - The kernel has `SLUB_DEBUG` for `/proc/slabinfo`; runtime debugging stays off.
